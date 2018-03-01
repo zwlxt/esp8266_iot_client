@@ -4,7 +4,6 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <FS.h>
-#include <Ticker.h>
 #include "webpage.h"
 
 const int CONFIG_JSON_SIZE = JSON_OBJECT_SIZE(6) + 440;
@@ -14,10 +13,10 @@ AsyncMqttClient mqttClient;
 WiFiEventHandler gotIPHandler;
 WiFiEventHandler stationModeDisconnectedHandler;
 AsyncWebServer webServer(80);
-Ticker checkConnection;
 String lastResetReason;
 int scanResultCount;
-unsigned long mqttLastConnectionTime;
+int mqttReconnectionAttempts = 0;
+unsigned long mqttLastReconnection;
 
 struct Config {
 	char server[64];
@@ -67,31 +66,22 @@ void setup() {
 
 	setupMQTTClient();
 
-	Serial.println("[WIFI] Connecting...");
 	gotIPHandler = WiFi.onStationModeGotIP(onGotIP);
 	stationModeDisconnectedHandler = WiFi.onStationModeDisconnected(onWiFiDisconnected);
 	WiFi.persistent(true);
-	WiFi.mode(WIFI_STA);
-	WiFi.begin();
 	WiFi.setAutoReconnect(true);
-
-	checkConnection.attach(10, []() {
-		if (WiFi.status() != WL_CONNECTED) {
-			Serial.println("[WIFI] Entering configuration mode");
-			WiFi.mode(WIFI_AP_STA);
-		}
-		if (!mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
-			mqttClient.connect();
-		}
-	});
-
 	if (WiFi.SSID().length() == 0) {
-		WiFi.mode(WIFI_AP_STA);
-		delay(500);
-		Serial.println("[WIFI] Starting Smart config");
-		WiFi.beginSmartConfig();
+		Serial.println("[WiFi] No credential");
+		setupNetwork();
+	} else {
+		Serial.print("[WIFI] Connecting to ");
+		Serial.println(WiFi.SSID());
+		WiFi.mode(WIFI_STA);
+		WiFi.begin();
 	}
-	scanResultCount = WiFi.scanNetworks(false, false);
+
+//	scanResultCount = WiFi.scanNetworks(false, false);
+	scanResultCount = 0;
 }
 
 void loop() {
@@ -99,8 +89,14 @@ void loop() {
 	delay(1000);
 	digitalWrite(LED_BUILTIN, HIGH);
 	delay(2000);
-//	if (WiFi.status() != WL_CONNECTED && millis() - mqttLastConnectionTime > 60000)
-//		mqttClient.connect();
+}
+
+void setupNetwork() {
+	Serial.println("[WIFI] Setting up network");
+	WiFi.mode(WIFI_AP_STA);
+	delay(500);
+	Serial.println("[WIFI] Starting Smart config");
+	WiFi.beginSmartConfig();
 }
 
 void setupMQTTClient() {
@@ -117,19 +113,21 @@ void onGotIP(const WiFiEventStationModeGotIP event) {
 	Serial.print("[WIFI] Assigned IP: ");
 	Serial.println(event.ip);
 	WiFi.mode(WIFI_STA);
+	WiFi.stopSmartConfig();
 	mqttClient.connect();
 }
 
 void onWiFiDisconnected(const WiFiEventStationModeDisconnected event) {
 	Serial.print("[WIFI] Disconnected, reason: ");
 	Serial.println(event.reason);
+	setupNetwork();
 	Serial.println("[WIFI] Reconnecting...");
 }
 
 void onMqttConnected(bool sessionPresent) {
 	Serial.println("[MQTT] Connected");
 	mqttClient.subscribe(config.topic, 1);
-	mqttLastConnectionTime = millis();
+	mqttReconnectionAttempts = 0;
 }
 
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
@@ -147,8 +145,17 @@ void onMqttDisconnected(AsyncMqttClientDisconnectReason reason) {
 	Serial.print("[MQTT] Disconnected, reason: ");
 	Serial.println((int8_t) reason);
 	if (WiFi.status() == WL_CONNECTED) {
-		Serial.println("[MQTT] Reconnecting...");
-		mqttClient.connect();
+		mqttReconnectionAttempts++;
+		if (mqttReconnectionAttempts > 10) { // After 10 times of reconnection
+			if (millis() - mqttLastReconnection > 10000) { // Must wait 10s before next reconnectio
+				mqttClient.connect();
+				mqttLastReconnection = millis();
+			}
+		} else {
+			Serial.println("[MQTT] Reconnecting...");
+			mqttClient.connect();
+			mqttLastReconnection = millis();
+		}
 	}
 }
 
@@ -332,7 +339,6 @@ void wifiConfigActionHandler(AsyncWebServerRequest *request) {
 		}
 	}
 	actionSuccessHandler(request);
-	WiFi.persistent(true);
 	WiFi.begin(ssid.c_str(), password.c_str());
 }
 
@@ -402,8 +408,7 @@ bool saveConfig() {
 	configJson["topic"] = config.topic;
 	configJson.printTo(file);
 	file.close();
-	setupMQTTClient();
-	mqttClient.disconnect(false);
+	ESP.reset();
 	return true;
 }
 
