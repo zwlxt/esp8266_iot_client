@@ -456,7 +456,8 @@ void mqttParseMessage(String &msg) {
 	JsonObject &msgObject = jsonBuffer.parseObject(msg);
 	if (!msgObject.success())
 		return;
-	if ((msgObject["cmd"] | "off") == "on") {
+	String cmd = msgObject["cmd"];
+	if (cmd == "on") {
 		Serial.println("== POWER ON ==");
 		mqttResponse(1);
 	}
