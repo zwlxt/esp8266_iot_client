@@ -2,7 +2,7 @@
 //This is a automatic generated file
 //Please do not modify this file
 //If you touch this file your change will be overwritten during the next build
-//This file has been generated on 2018-03-19 02:27:15
+//This file has been generated on 2018-03-19 02:32:48
 
 #include "Arduino.h"
 #include <ESP8266WiFi.h>
@@ -35,6 +35,7 @@ void scanWiFiPageHandler(AsyncWebServerRequest *request) ;
 String scanWiFiTemplateProcessor(const String var) ;
 void updatePageHandler(AsyncWebServerRequest *request) ;
 void updateActionHandler(AsyncWebServerRequest *request) ;
+void restartActionHandler(AsyncWebServerRequest *request) ;
 void actionSuccessHandler(AsyncWebServerRequest *request) ;
 void actionFailedHandler(AsyncWebServerRequest *request) ;
 bool saveConfig() ;

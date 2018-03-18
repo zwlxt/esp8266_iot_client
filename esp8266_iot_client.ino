@@ -13,10 +13,11 @@ AsyncMqttClient mqttClient;
 WiFiEventHandler gotIPHandler;
 WiFiEventHandler stationModeDisconnectedHandler;
 AsyncWebServer webServer(80);
-String lastResetReason;
 int scanResultCount;
 int mqttReconnectionAttempts = 0;
 unsigned long mqttLastReconnection;
+unsigned long wifiLastConnection;
+String lastResetReason;
 
 struct Config {
 	char server[64];
@@ -33,6 +34,8 @@ void setup() {
 	Serial.print("[SYS] Reset reason: ");
 	lastResetReason = ESP.getResetReason();
 	Serial.println(lastResetReason);
+	if (lastResetReason == "Exception")
+		ESP.restart();
 
 	pinMode(LED_BUILTIN, OUTPUT);
 
@@ -59,6 +62,7 @@ void setup() {
 	webServer.on("/action/serverconfig", HTTP_POST, serverConfigActionHandler);
 	webServer.on("/action/wificonfig", HTTP_POST, wifiConfigActionHandler);
 	webServer.on("/action/update", HTTP_POST, updateActionHandler);
+	webServer.on("/action/restart", HTTP_GET, restartActionHandler);
 	webServer.onNotFound([](AsyncWebServerRequest *request) {
 		request->send(404);
 	});
@@ -80,8 +84,7 @@ void setup() {
 		WiFi.begin();
 	}
 
-//	scanResultCount = WiFi.scanNetworks(false, false);
-	scanResultCount = 0;
+	scanResultCount = WiFi.scanNetworks(false, false);
 }
 
 void loop() {
@@ -89,14 +92,29 @@ void loop() {
 	delay(1000);
 	digitalWrite(LED_BUILTIN, HIGH);
 	delay(2000);
+
+	// This will restart the chip when WiFi reconnecting doesn't work
+	if (WiFi.SSID().length() != 0) { // WiFi credential exists
+		if (WiFi.status() == WL_CONNECTED) {
+			wifiLastConnection = millis();
+		} else {
+			if (millis() - wifiLastConnection > 60000) { // Disconnected for 60s
+				ESP.restart();
+			}
+		}
+	}
 }
 
 void setupNetwork() {
-	Serial.println("[WIFI] Setting up network");
-	WiFi.mode(WIFI_AP_STA);
-	delay(500);
-	Serial.println("[WIFI] Starting Smart config");
-	WiFi.beginSmartConfig();
+	if (WiFi.getMode() != WIFI_AP_STA) {
+		Serial.println("[WIFI] Starting network configuration");
+		WiFi.mode(WIFI_AP_STA);
+		char ssid[16];
+		snprintf(ssid, sizeof(ssid), "DEVICE_%d", ESP.getChipId());
+		WiFi.softAP(ssid);
+		Serial.println("[WIFI] Starting smart config");
+		WiFi.beginSmartConfig();
+	}
 }
 
 void setupMQTTClient() {
@@ -112,8 +130,9 @@ void setupMQTTClient() {
 void onGotIP(const WiFiEventStationModeGotIP event) {
 	Serial.print("[WIFI] Assigned IP: ");
 	Serial.println(event.ip);
-	WiFi.mode(WIFI_STA);
 	WiFi.stopSmartConfig();
+	WiFi.softAPdisconnect(false);
+	WiFi.mode(WIFI_STA);
 	mqttClient.connect();
 }
 
@@ -132,11 +151,8 @@ void onMqttConnected(bool sessionPresent) {
 
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
 	Serial.print("[MQTT] Receiving: ");
-//	for (uint8_t i = 0; i < (uint8_t) len; i ++) {
-//		Serial.print(payload[i]);
-//	}
-//	Serial.println();
 	String plStr(payload);
+	plStr = plStr.substring(0, len);
 	Serial.println(plStr);
 	mqttParseMessage(plStr);
 }
@@ -378,9 +394,13 @@ void updateActionHandler(AsyncWebServerRequest *request) {
 			actionFailedHandler(request);
 		} else {
 			actionSuccessHandler(request);
-			ESP.reset();
+			ESP.restart();
 		}
 	}
+}
+
+void restartActionHandler(AsyncWebServerRequest *request) {
+	ESP.restart();
 }
 
 void actionSuccessHandler(AsyncWebServerRequest *request) {
@@ -408,7 +428,7 @@ bool saveConfig() {
 	configJson["topic"] = config.topic;
 	configJson.printTo(file);
 	file.close();
-	ESP.reset();
+	ESP.restart();
 	return true;
 }
 

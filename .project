@@ -34,72 +34,72 @@
 		<link>
 			<name>core/core</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/cores/esp8266</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/cores/esp8266</location>
 		</link>
 		<link>
 			<name>core/variant</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/variants/nodemcu</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/variants/nodemcu</location>
 		</link>
 		<link>
 			<name>libraries/ArduinoJson</name>
 			<type>2</type>
-			<location>C:/Users/zengw/AppData/Local/Arduino15/packages/esp8266/hardware/esp8266/2.4.0/libraries/ArduinoJson</location>
+			<locationURI>ECLIPSE_HOME/arduinoPlugin/libraries/ArduinoJson/5.13.0</locationURI>
 		</link>
 		<link>
 			<name>libraries/EEPROM</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/EEPROM</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/EEPROM</location>
 		</link>
 		<link>
 			<name>libraries/ESP8266HTTPClient</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/ESP8266HTTPClient</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/ESP8266HTTPClient</location>
 		</link>
 		<link>
 			<name>libraries/ESP8266WiFi</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/ESP8266WiFi</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/ESP8266WiFi</location>
 		</link>
 		<link>
 			<name>libraries/ESP8266httpUpdate</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/ESP8266httpUpdate</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/ESP8266httpUpdate</location>
 		</link>
 		<link>
 			<name>libraries/ESPAsyncTCP</name>
 			<type>2</type>
-			<location>C:/Users/zengw/AppData/Local/Arduino15/packages/esp8266/hardware/esp8266/2.4.0/libraries/ESPAsyncTCP</location>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/ESPAsyncTCP</location>
 		</link>
 		<link>
 			<name>libraries/ESPAsyncWebServer</name>
 			<type>2</type>
-			<location>C:/Users/zengw/AppData/Local/Arduino15/packages/esp8266/hardware/esp8266/2.4.0/libraries/ESPAsyncWebServer</location>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/ESPAsyncWebServer</location>
 		</link>
 		<link>
 			<name>libraries/Hash</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/Hash</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/Hash</location>
 		</link>
 		<link>
 			<name>libraries/SD</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/SD</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/SD</location>
 		</link>
 		<link>
 			<name>libraries/SPI</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/SPI</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/SPI</location>
 		</link>
 		<link>
 			<name>libraries/Ticker</name>
 			<type>2</type>
-			<locationURI>ECLIPSE_HOME/arduinoPlugin/packages/esp8266/hardware/esp8266/2.3.0/libraries/Ticker</locationURI>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/Ticker</location>
 		</link>
 		<link>
 			<name>libraries/async-mqtt-client</name>
 			<type>2</type>
-			<location>C:/Users/zengw/AppData/Local/Arduino15/packages/esp8266/hardware/esp8266/2.4.0/libraries/async-mqtt-client</location>
+			<location>D:/dev/arduino-1.8.5/hardware/esp8266com/esp8266/libraries/async-mqtt-client</location>
 		</link>
 	</linkedResources>
 </projectDescription>

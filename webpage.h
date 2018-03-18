@@ -17,6 +17,7 @@ const char INDEX_PAGE[] PROGMEM = {
 		"        <a href=\"/wifi\">WiFi Settings</a>\n"
 		"        <a href=\"/server\">Server Settings</a>\n"
 		"        <a href=\"/update\">Update Firmware</a>\n"
+		"        <a href=\"/action/restart\">Restart</a>\n"
 		"    </p>\n"
 		"    <table style=\"margin: 0px auto\" border=2>\n"
 		"        <tr>\n"
