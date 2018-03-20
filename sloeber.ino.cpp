@@ -2,7 +2,7 @@
 //This is a automatic generated file
 //Please do not modify this file
 //If you touch this file your change will be overwritten during the next build
-//This file has been generated on 2018-03-19 02:32:48
+//This file has been generated on 2018-03-21 02:15:07
 
 #include "Arduino.h"
 #include <ESP8266WiFi.h>
@@ -43,6 +43,9 @@ bool loadConfig() ;
 void loadDefaultConfig() ;
 void mqttParseMessage(String &msg) ;
 void mqttResponse(int msg) ;
+void updateFirmware() ;
+void updateState() ;
+void handleEmergency() ;
 
 #include "esp8266_iot_client.ino"
 

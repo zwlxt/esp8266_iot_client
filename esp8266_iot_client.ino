@@ -6,6 +6,9 @@
 #include <FS.h>
 #include "webpage.h"
 
+const uint8_t PIN_BLINK = LED_BUILTIN;
+const uint8_t PIN_VALVE_EN = 12;
+
 const int CONFIG_JSON_SIZE = JSON_OBJECT_SIZE(6) + 440;
 const char *CONFIG_FILE_PATH = "/config.json";
 
@@ -18,6 +21,9 @@ int mqttReconnectionAttempts = 0;
 unsigned long mqttLastReconnection;
 unsigned long wifiLastConnection;
 String lastResetReason;
+bool requestFirmwareUpdate;
+bool requestReboot;
+String firmwareURL;
 
 struct Config {
 	char server[64];
@@ -28,16 +34,26 @@ struct Config {
 	char topic[64];
 } config;
 
+struct State {
+	bool power;
+	String lastResetReason;
+	uint32_t freeHeap;
+
+} state;
+
 void setup() {
 	Serial.begin(115200);
 	Serial.println();
 	Serial.print("[SYS] Reset reason: ");
-	lastResetReason = ESP.getResetReason();
+	state.lastResetReason = ESP.getResetReason();
 	Serial.println(lastResetReason);
-	if (lastResetReason == "Exception")
+	if (state.lastResetReason == "Exception")
 		ESP.restart();
 
-	pinMode(LED_BUILTIN, OUTPUT);
+	pinMode(PIN_BLINK, OUTPUT);
+	pinMode(PIN_VALVE_EN, OUTPUT);
+
+	updateState();
 
 	Serial.println("[SYS] Mounting FS...");
 	SPIFFS.begin();
@@ -93,28 +109,44 @@ void loop() {
 	digitalWrite(LED_BUILTIN, HIGH);
 	delay(2000);
 
+	updateState();
+
+	if (requestReboot) {
+		handleEmergency();
+		ESP.restart();
+	}
+
+	if (WiFi.status() != WL_CONNECTED) {
+		handleEmergency();
+	}
+
 	// This will restart the chip when WiFi reconnecting doesn't work
 	if (WiFi.SSID().length() != 0) { // WiFi credential exists
 		if (WiFi.status() == WL_CONNECTED) {
 			wifiLastConnection = millis();
 		} else {
-			if (millis() - wifiLastConnection > 60000) { // Disconnected for 60s
+			if (millis() - wifiLastConnection > 300000) { // Disconnected for 10min
 				ESP.restart();
 			}
 		}
 	}
+
+	// OTA
+	if (requestFirmwareUpdate) {
+		handleEmergency();
+		updateFirmware();
+	}
 }
 
 void setupNetwork() {
-	if (WiFi.getMode() != WIFI_AP_STA) {
-		Serial.println("[WIFI] Starting network configuration");
-		WiFi.mode(WIFI_AP_STA);
-		char ssid[16];
-		snprintf(ssid, sizeof(ssid), "DEVICE_%d", ESP.getChipId());
-		WiFi.softAP(ssid);
-		Serial.println("[WIFI] Starting smart config");
-		WiFi.beginSmartConfig();
-	}
+	Serial.println("[WIFI] Starting network configuration");
+	WiFi.mode(WIFI_AP_STA);
+	char ssid[16];
+	snprintf(ssid, sizeof(ssid), "DEVICE_%d", ESP.getChipId());
+	WiFi.softAP(ssid);
+	Serial.println("[WIFI] Starting smart config");
+	WiFi.beginSmartConfig();
+
 }
 
 void setupMQTTClient() {
@@ -133,13 +165,20 @@ void onGotIP(const WiFiEventStationModeGotIP event) {
 	WiFi.stopSmartConfig();
 	WiFi.softAPdisconnect(false);
 	WiFi.mode(WIFI_STA);
+	Serial.print("[MQTT] Connecting to ");
+	Serial.print(config.server);
+	Serial.print(":");
+	Serial.println(config.port);
 	mqttClient.connect();
 }
 
 void onWiFiDisconnected(const WiFiEventStationModeDisconnected event) {
 	Serial.print("[WIFI] Disconnected, reason: ");
 	Serial.println(event.reason);
-	setupNetwork();
+
+	if (WiFi.getMode() != WIFI_AP_STA && WiFi.status() != WL_CONNECTED) {
+		setupNetwork();
+	}
 	Serial.println("[WIFI] Reconnecting...");
 }
 
@@ -181,7 +220,7 @@ void indexPageHandler(AsyncWebServerRequest *request) {
 
 String indexTemplateProcessor(const String &var) {
 	if (var == "heap") {
-		uint32_t heap = ESP.getFreeHeap();
+		uint32_t heap = state.freeHeap;
 		char result[6];
 		ltoa((long) heap, result, 10);
 		return result;
@@ -299,15 +338,16 @@ void serverConfigActionHandler(AsyncWebServerRequest *request) {
 		param = request->getParam("topic", true);
 		v = param->value();
 		if (v.length() > 0 && v.length() < 64) {
-			strlcpy(config.topic, v.c_str(), sizeof(config.topic)); // @suppress("Invalid arguments")
+			strlcpy(config.topic, v.c_str(), sizeof(config.topic));
 		} else {
 			actionFailedHandler(request);
 			return;
 		}
 	}
-	if (saveConfig())
+	if (saveConfig()) {
 		actionSuccessHandler(request);
-	else
+		requestReboot = true;
+	} else
 		actionFailedHandler(request);
 }
 
@@ -390,17 +430,17 @@ void updatePageHandler(AsyncWebServerRequest *request) {
 void updateActionHandler(AsyncWebServerRequest *request) {
 	if (request->hasParam("fw_src", true)) {
 		AsyncWebParameter *param = request->getParam("fw_src", true);
-		if (ESPhttpUpdate.update(param->value()) == HTTP_UPDATE_FAILED) {
-			actionFailedHandler(request);
-		} else {
-			actionSuccessHandler(request);
-			ESP.restart();
-		}
+		firmwareURL = param->value();
+		actionSuccessHandler(request);
+		requestFirmwareUpdate = true;
+		return;
 	}
+	actionFailedHandler(request);
 }
 
 void restartActionHandler(AsyncWebServerRequest *request) {
-	ESP.restart();
+	actionSuccessHandler(request);
+	requestReboot = true;
 }
 
 void actionSuccessHandler(AsyncWebServerRequest *request) {
@@ -428,7 +468,6 @@ bool saveConfig() {
 	configJson["topic"] = config.topic;
 	configJson.printTo(file);
 	file.close();
-	ESP.restart();
 	return true;
 }
 
@@ -479,11 +518,68 @@ void mqttParseMessage(String &msg) {
 	String cmd = msgObject["cmd"];
 	if (cmd == "on") {
 		Serial.println("== POWER ON ==");
+		state.power = true;
 		mqttResponse(1);
+	}
+	if (cmd == "off") {
+		Serial.println("== POWER OFF ==");
+		state.power = false;
+		mqttResponse(1);
+	}
+	if (cmd == "report") {
+		Serial.println("== Reporting ==");
+		mqttResponse(2);
 	}
 }
 
 void mqttResponse(int msg) {
-	String payload = "{\"response\":\"ok\"}";
+	String payload;
+	switch (msg) {
+	case 1:
+		payload = "{\"response\":\"ok\"}";
+		break;
+	case 2:
+		const char *template_ = "{\"response\":\"ok\",\"entity\":{"
+				"\"reset_reason\":\"%s\","
+				"\"heap\":%d,"
+				"\"power\":\"%s\""
+				"}}";
+		char buffer[120];
+		snprintf(buffer, sizeof(buffer), template_,
+				state.lastResetReason.c_str(),
+				state.freeHeap,
+				state.power ? "true" : "false");
+		payload = buffer;
+		break;
+	}
 	mqttClient.publish(config.topic, 1, true, payload.c_str(), payload.length());
+}
+
+void updateFirmware() {
+	Serial.println("[OTA] Begin OTA");
+	ESPhttpUpdate.rebootOnUpdate(false);
+	switch (ESPhttpUpdate.update(firmwareURL)) {
+	case HTTP_UPDATE_FAILED:
+		Serial.println("[OTA] Failed");
+		break;
+	case HTTP_UPDATE_NO_UPDATES:
+		Serial.println("[OTA] No updates");
+		break;
+	case HTTP_UPDATE_OK:
+		Serial.println("[OTA] OK");
+		requestReboot = true;
+	}
+}
+
+void updateState() {
+	state.freeHeap = ESP.getFreeHeap();
+	state.lastResetReason = ESP.getResetReason();
+
+	digitalWrite(PIN_VALVE_EN, state.power ? HIGH : LOW);
+}
+
+void handleEmergency() {
+	// close the valve
+	state.power = false;
+	updateState();
 }
