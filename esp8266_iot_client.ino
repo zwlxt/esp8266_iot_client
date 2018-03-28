@@ -1,10 +1,15 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266httpUpdate.h>
+#include <ESP8266HTTPClient.h>
 #include <AsyncMqttClient.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <FS.h>
 #include "webpage.h"
+
+#define DBG_SERIAL Serial
+#define _LOG(...) DBG_SERIAL.print(__VA_ARGS__)
+#define _LOGLN(...) DBG_SERIAL.println(__VA_ARGS__)
 
 const uint8_t PIN_BLINK = LED_BUILTIN;
 const uint8_t PIN_VALVE_EN = 12;
@@ -17,36 +22,37 @@ WiFiEventHandler gotIPHandler;
 WiFiEventHandler stationModeDisconnectedHandler;
 AsyncWebServer webServer(80);
 int scanResultCount;
-int mqttReconnectionAttempts = 0;
-unsigned long mqttLastReconnection;
+int restartCount = 0;
 unsigned long wifiLastConnection;
-String lastResetReason;
+unsigned long valveLastOff;
 bool requestFirmwareUpdate;
 bool requestReboot;
-String firmwareURL;
+bool requestSyncClock;
+AsyncMqttClientDisconnectReason mqttClientDisconnectReason;
 
 struct Config {
-	char server[64];
+	String server;
 	uint16_t port;
-	char clientId[23];
-	char username[64];
-	char password[64];
-	char topic[64];
+	String clientId;
+	String username;
+	String password;
+	String topic;
+	String otaSource;
 } config;
 
 struct State {
-	bool power;
+	bool valvePower;
 	String lastResetReason;
 	uint32_t freeHeap;
-
+	IPAddress localIP;
 } state;
 
 void setup() {
-	Serial.begin(115200);
-	Serial.println();
-	Serial.print("[SYS] Reset reason: ");
+	DBG_SERIAL.begin(115200);
+	_LOGLN();
+	_LOG("[SYS] Reset reason: ");
 	state.lastResetReason = ESP.getResetReason();
-	Serial.println(lastResetReason);
+	_LOGLN(state.lastResetReason);
 	if (state.lastResetReason == "Exception")
 		ESP.restart();
 
@@ -55,20 +61,20 @@ void setup() {
 
 	updateState();
 
-	Serial.println("[SYS] Mounting FS...");
+	_LOGLN("[SYS] Mounting FS...");
 	SPIFFS.begin();
 
 	if (!loadConfig()) {
 		loadDefaultConfig();
 	} else {
-		Serial.println("[CONFIG] Found config file");
+		_LOGLN("[CONFIG] Found config file");
 	}
-	Serial.print("[CONFIG] Server: ");
-	Serial.println(config.server);
-	Serial.print("[CONFIG] port: ");
-	Serial.println(config.port);
+	_LOG("[CONFIG] Server: ");
+	_LOGLN(config.server);
+	_LOG("[CONFIG] port: ");
+	_LOGLN(config.port);
 
-	Serial.println("[SYS] Starting web server");
+	_LOGLN("[SYS] Starting web server");
 	webServer.on("/", HTTP_GET, indexPageHandler);
 	webServer.on("/server", HTTP_GET, serverConfigPageHandler);
 	webServer.on("/wifi", HTTP_GET, wifiConfigPageHandler);
@@ -91,11 +97,11 @@ void setup() {
 	WiFi.persistent(true);
 	WiFi.setAutoReconnect(true);
 	if (WiFi.SSID().length() == 0) {
-		Serial.println("[WiFi] No credential");
+		_LOGLN("[WiFi] No credential");
 		setupNetwork();
 	} else {
-		Serial.print("[WIFI] Connecting to ");
-		Serial.println(WiFi.SSID());
+		_LOG("[WIFI] Connecting to ");
+		_LOGLN(WiFi.SSID());
 		WiFi.mode(WIFI_STA);
 		WiFi.begin();
 	}
@@ -111,22 +117,48 @@ void loop() {
 
 	updateState();
 
-	if (requestReboot) {
+	// Auto close valve
+	if (!state.valvePower) {
+		valveLastOff = millis();
+	} else {
+		if (millis() - valveLastOff > 300 * 1000) { // if the valve is on for more than 5min
+			_LOGLN("[SYS] Auto closing");
+			handleEmergency();
+		}
+	}
+
+	// Handling sync clock request
+	if (requestSyncClock) {
+		syncClock();
+		requestSyncClock = false;
+	}
+
+	// Handling reboot request
+	if (requestReboot || restartCount > 10) {
+		_LOGLN("[SYS] Rebooting...");
 		handleEmergency();
 		ESP.restart();
 	}
 
-	if (WiFi.status() != WL_CONNECTED) {
+	// Reconnect
+	if (!WiFi.isConnected()) {
+		_LOGLN("[WIFI] Reconnecting...");
 		handleEmergency();
+		WiFi.reconnect();
+	}
+
+	if (WiFi.isConnected() && !mqttClient.connected()) {
+		_LOGLN("[MQTT] Reconnecting ...");
+		mqttClient.connect();
 	}
 
 	// This will restart the chip when WiFi reconnecting doesn't work
 	if (WiFi.SSID().length() != 0) { // WiFi credential exists
-		if (WiFi.status() == WL_CONNECTED) {
+		if (WiFi.isConnected()) {
 			wifiLastConnection = millis();
 		} else {
-			if (millis() - wifiLastConnection > 300000) { // Disconnected for 10min
-				ESP.restart();
+			if (millis() - wifiLastConnection > 10000 && WiFi.getMode() != WIFI_AP_STA) { // Disconnected for 10s
+				setupNetwork();
 			}
 		}
 	}
@@ -134,84 +166,77 @@ void loop() {
 	// OTA
 	if (requestFirmwareUpdate) {
 		handleEmergency();
+		saveConfig();
 		updateFirmware();
 	}
 }
 
 void setupNetwork() {
-	Serial.println("[WIFI] Starting network configuration");
+	_LOGLN("[WIFI] Starting network configuration");
 	WiFi.mode(WIFI_AP_STA);
 	char ssid[16];
 	snprintf(ssid, sizeof(ssid), "DEVICE_%d", ESP.getChipId());
 	WiFi.softAP(ssid);
-	Serial.println("[WIFI] Starting smart config");
+	_LOGLN("[WIFI] Starting smart config");
 	WiFi.beginSmartConfig();
 
 }
 
 void setupMQTTClient() {
-	Serial.println("[SYS] Setting up MQTT client");
-	mqttClient.setServer(config.server, config.port);
-	mqttClient.setClientId(config.clientId);
-	mqttClient.setCredentials(config.username, config.password);
+	_LOGLN("[SYS] Setting up MQTT client");
+	mqttClient.setServer(config.server.c_str(), config.port);
+	mqttClient.setClientId(config.clientId.c_str());
+	mqttClient.setCredentials(config.username.c_str(), config.password.c_str());
 	mqttClient.onConnect(onMqttConnected);
 	mqttClient.onMessage(onMqttMessage);
 	mqttClient.onDisconnect(onMqttDisconnected);
 }
 
 void onGotIP(const WiFiEventStationModeGotIP event) {
-	Serial.print("[WIFI] Assigned IP: ");
-	Serial.println(event.ip);
+	_LOG("[WIFI] Assigned IP: ");
+	_LOGLN(event.ip);
 	WiFi.stopSmartConfig();
 	WiFi.softAPdisconnect(false);
 	WiFi.mode(WIFI_STA);
-	Serial.print("[MQTT] Connecting to ");
-	Serial.print(config.server);
-	Serial.print(":");
-	Serial.println(config.port);
+	_LOG("[MQTT] Connecting to ");
+	_LOG(config.server);
+	_LOG(":");
+	_LOGLN(config.port);
 	mqttClient.connect();
+	requestSyncClock = true;
 }
 
 void onWiFiDisconnected(const WiFiEventStationModeDisconnected event) {
-	Serial.print("[WIFI] Disconnected, reason: ");
-	Serial.println(event.reason);
+	_LOG("[WIFI] Disconnected, reason: ");
+	_LOGLN(event.reason);
+
+	if (event.reason <= 200)
+		restartCount++;
 
 	if (WiFi.getMode() != WIFI_AP_STA && WiFi.status() != WL_CONNECTED) {
 		setupNetwork();
 	}
-	Serial.println("[WIFI] Reconnecting...");
 }
 
-void onMqttConnected(bool sessionPresent) {
-	Serial.println("[MQTT] Connected");
-	mqttClient.subscribe(config.topic, 1);
-	mqttReconnectionAttempts = 0;
+void onMqttConnected(bool /*sessionPresent*/) {
+	_LOGLN("[MQTT] Connected");
+	mqttResponse(2, "");
+	mqttClient.subscribe(config.topic.c_str(), 1);
 }
 
-void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-	Serial.print("[MQTT] Receiving: ");
+void onMqttMessage(char* /*topic*/, char* payload, AsyncMqttClientMessageProperties /*properties*/, size_t len, size_t /*index*/, size_t /*total*/) {
+	_LOG("[MQTT] Receiving: ");
 	String plStr(payload);
 	plStr = plStr.substring(0, len);
-	Serial.println(plStr);
+	_LOGLN(plStr);
 	mqttParseMessage(plStr);
 }
 
 void onMqttDisconnected(AsyncMqttClientDisconnectReason reason) {
-	Serial.print("[MQTT] Disconnected, reason: ");
-	Serial.println((int8_t) reason);
-	if (WiFi.status() == WL_CONNECTED) {
-		mqttReconnectionAttempts++;
-		if (mqttReconnectionAttempts > 10) { // After 10 times of reconnection
-			if (millis() - mqttLastReconnection > 10000) { // Must wait 10s before next reconnectio
-				mqttClient.connect();
-				mqttLastReconnection = millis();
-			}
-		} else {
-			Serial.println("[MQTT] Reconnecting...");
-			mqttClient.connect();
-			mqttLastReconnection = millis();
-		}
-	}
+	_LOG("[MQTT] Disconnected, reason: ");
+	_LOGLN((int8_t) reason);
+	if (reason != AsyncMqttClientDisconnectReason::TCP_DISCONNECTED)
+		mqttClientDisconnectReason = reason;
 }
 
 void indexPageHandler(AsyncWebServerRequest *request) {
@@ -226,7 +251,7 @@ String indexTemplateProcessor(const String &var) {
 		return result;
 	}
 	if (var == "reset_reason")
-		return lastResetReason;
+		return state.lastResetReason;
 	if (var == "ssid")
 		return WiFi.SSID();
 	if (var == "rssi") {
@@ -236,7 +261,7 @@ String indexTemplateProcessor(const String &var) {
 		return result;
 	}
 	if (var == "mqtt_status")
-		return mqttClient.connected() ? "Connected" : "Disconnected";
+		return mqttClient.connected() ? "Connected" : "Disconnected " + String((int)mqttClientDisconnectReason);
 	return String();
 }
 
@@ -263,7 +288,7 @@ String serverConfigTemplateProcessor(const String &var) {
 	if (var == "password")
 		return String();
 	if (var == "nopass")
-		if (strlen(config.password) == 0)
+		if (config.password.length() == 0)
 			return "checked";
 	if (var == "topic")
 		return config.topic;
@@ -277,7 +302,7 @@ void serverConfigActionHandler(AsyncWebServerRequest *request) {
 		param = request->getParam("server", true);
 		v = param->value();
 		if (v.length() > 0 && v.length() < 64) {
-			strlcpy(config.server, v.c_str(), sizeof(config.server));
+			config.server = v;
 		} else {
 			actionFailedHandler(request);
 			return;
@@ -298,7 +323,7 @@ void serverConfigActionHandler(AsyncWebServerRequest *request) {
 		param = request->getParam("client_id", true);
 		v = param->value();
 		if (v.length() > 0 && v.length() < 64) {
-			strlcpy(config.clientId, v.c_str(), sizeof(config.clientId));
+			config.clientId = v;
 		} else {
 			actionFailedHandler(request);
 			return;
@@ -308,7 +333,7 @@ void serverConfigActionHandler(AsyncWebServerRequest *request) {
 		param = request->getParam("username", true);
 		v = param->value();
 		if (v.length() < 64) { // Username can be empty. If so, no credential is used
-			strlcpy(config.username, v.c_str(), sizeof(config.username));
+			config.username = v;
 		} else {
 			actionFailedHandler(request);
 			return;
@@ -319,18 +344,15 @@ void serverConfigActionHandler(AsyncWebServerRequest *request) {
 		param = request->getParam("nopass", true);
 		if (param->value() == "on") {
 			nopass = true;
-			memset(config.password, '\0', sizeof(config.password));
+			config.password = "";
 		}
 	}
 	if (!nopass) { // nopass is unchecked
 		if (request->hasParam("password", true)) {
 			param = request->getParam("password", true);
 			v = param->value();
-			if (v.length() < 64) {
-				strlcpy(config.password, v.c_str(), sizeof(config.password));
-			} else {
-				actionFailedHandler(request);
-				return;
+			if (v.length() > 0 && v.length() < 64) {
+				config.password = v;
 			}
 		}
 	}
@@ -338,7 +360,7 @@ void serverConfigActionHandler(AsyncWebServerRequest *request) {
 		param = request->getParam("topic", true);
 		v = param->value();
 		if (v.length() > 0 && v.length() < 64) {
-			strlcpy(config.topic, v.c_str(), sizeof(config.topic));
+			config.topic = v;
 		} else {
 			actionFailedHandler(request);
 			return;
@@ -424,13 +446,20 @@ String scanWiFiTemplateProcessor(const String var) {
 }
 
 void updatePageHandler(AsyncWebServerRequest *request) {
-	request->send_P(200, "text/html", UPDATE_PAGE);
+	request->send_P(200, "text/html", UPDATE_PAGE, updatePageTemplateProcessor);
+}
+
+String updatePageTemplateProcessor(const String var) {
+	if (var == "fw_src") {
+		return config.otaSource;
+	}
+	return String();
 }
 
 void updateActionHandler(AsyncWebServerRequest *request) {
 	if (request->hasParam("fw_src", true)) {
 		AsyncWebParameter *param = request->getParam("fw_src", true);
-		firmwareURL = param->value();
+		config.otaSource = param->value();
 		actionSuccessHandler(request);
 		requestFirmwareUpdate = true;
 		return;
@@ -452,10 +481,10 @@ void actionFailedHandler(AsyncWebServerRequest *request) {
 }
 
 bool saveConfig() {
-	Serial.println("[CONFIG] Saving config");
+	_LOGLN("[CONFIG] Saving config");
 	File file = SPIFFS.open(CONFIG_FILE_PATH, "w+");
 	if (!file) {
-		Serial.println("[CONFIG] Unable to open config file");
+		_LOGLN("[CONFIG] Unable to open config file");
 		return false;
 	}
 	StaticJsonBuffer<CONFIG_JSON_SIZE> jsonBuffer;
@@ -466,20 +495,21 @@ bool saveConfig() {
 	configJson["username"] = config.username;
 	configJson["password"] = config.password;
 	configJson["topic"] = config.topic;
+	configJson["ota_src"] = config.otaSource;
 	configJson.printTo(file);
 	file.close();
 	return true;
 }
 
 bool loadConfig() {
-	Serial.println("[CONFIG] Loading config");
+	_LOGLN("[CONFIG] Loading config");
 	if (!SPIFFS.exists(CONFIG_FILE_PATH)) {
-		Serial.println("[CONFIG] Config file does not exist");
+		_LOGLN("[CONFIG] Config file does not exist");
 		return false;
 	}
 	File file = SPIFFS.open(CONFIG_FILE_PATH, "r");
 	if (!file) {
-		Serial.println("[CONFIG] Cannot read config file");
+		_LOGLN("[CONFIG] Cannot read config file");
 		return false;
 	}
 
@@ -487,26 +517,28 @@ bool loadConfig() {
 	JsonObject &configJson = jsonBuffer.parseObject(file.readString());
 	file.close();
 	if (!configJson.success()) {
-		Serial.println("[CONFIG] Cannot decode config file");
+		_LOGLN("[CONFIG] Cannot decode config file");
 		return false;
 	}
-	strlcpy(config.server, configJson["server"], sizeof(config.server));
+	config.server = (const char*)configJson["server"];
 	config.port = configJson["port"];
-	strlcpy(config.clientId, configJson["clid"], sizeof(config.clientId));
-	strlcpy(config.username, configJson["username"], sizeof(config.username));
-	strlcpy(config.password, configJson["password"], sizeof(config.password));
-	strlcpy(config.topic, configJson["topic"], sizeof(config.topic));
+	config.clientId = (const char*)configJson["clid"];
+	config.username = (const char*)configJson["username"];
+	config.password = (const char*)configJson["password"];
+	config.topic = (const char*)configJson["topic"];
+	config.otaSource = (const char*)configJson["ota_src"];
 	return true;
 }
 
 void loadDefaultConfig() {
-	Serial.println("[CONFIG] Loading default config");
-	strlcpy(config.server, "iot.eclipse.org", sizeof(config.server));
+	_LOGLN("[CONFIG] Loading default config");
+	config.server = "iot.eclipse.org";
 	config.port = 1883;
-	strlcpy(config.clientId, "id_example", sizeof(config.clientId));
-	strlcpy(config.username, "exampleuser", sizeof(config.username));
-	strlcpy(config.password, "examplepassword", sizeof(config.password));
-	strlcpy(config.topic, "/test", sizeof(config.topic));
+	config.clientId = "id_example";
+	config.username = "exampleuser";
+	config.password = "examplepassword";
+	config.topic = "/test";
+	config.otaSource = "";
 	saveConfig();
 }
 
@@ -516,57 +548,82 @@ void mqttParseMessage(String &msg) {
 	if (!msgObject.success())
 		return;
 	String cmd = msgObject["cmd"];
+	String hash = msgObject["hash"];
+	if (hash.length() == 0)
+		return;
 	if (cmd == "on") {
-		Serial.println("== POWER ON ==");
-		state.power = true;
-		mqttResponse(1);
+		_LOGLN("== POWER ON ==");
+		controlValve(true);
+		mqttResponse(1, hash);
 	}
 	if (cmd == "off") {
-		Serial.println("== POWER OFF ==");
-		state.power = false;
-		mqttResponse(1);
+		_LOGLN("== POWER OFF ==");
+		controlValve(false);
+		mqttResponse(1, hash);
 	}
 	if (cmd == "report") {
-		Serial.println("== Reporting ==");
-		mqttResponse(2);
+		_LOGLN("== Reporting ==");
+		mqttResponse(2, hash);
 	}
 }
 
-void mqttResponse(int msg) {
+void mqttResponse(int msg, String hash) {
 	String payload;
 	switch (msg) {
 	case 1:
-		payload = "{\"response\":\"ok\"}";
+		payload = String("{\"response\":\"ok\",") + "\"hash\":" + hash + "}";
 		break;
-	case 2:
-		const char *template_ = "{\"response\":\"ok\",\"entity\":{"
+	case 2: {
+		const char *template_ = "{\"response\":\"ok\","
+				"\"hash\":\"%s\""
+				"\"entity\":{"
 				"\"reset_reason\":\"%s\","
 				"\"heap\":%d,"
 				"\"power\":\"%s\""
 				"}}";
 		char buffer[120];
 		snprintf(buffer, sizeof(buffer), template_,
+				hash.c_str(),
 				state.lastResetReason.c_str(),
 				state.freeHeap,
-				state.power ? "true" : "false");
+				state.valvePower ? "true" : "false");
 		payload = buffer;
 		break;
 	}
-	mqttClient.publish(config.topic, 1, true, payload.c_str(), payload.length());
+	default:
+		payload = String("{\"response\":\"undefined command\",") + "\"hash\":" + hash + "}";
+		break;
+	}
+	mqttClient.publish(config.topic.c_str(), 1, true,
+			payload.c_str(), payload.length());
+}
+
+void mqttUploadIntDataPoint(String k, int v) {
+	String dataPoint = "{\"" + k + "\":" + v + "}";
+	char lenHigh = (dataPoint.length() & 0xff00) >> 8;
+	char lenLow = dataPoint.length() & 0xff;
+	String payload = "\x03";
+	payload += lenHigh;
+	payload += lenLow;
+	payload += dataPoint;
+	mqttClient.publish("$dp", 1, false, payload.c_str(), payload.length());
 }
 
 void updateFirmware() {
-	Serial.println("[OTA] Begin OTA");
+	_LOG("[OTA] Getting OTA updates from URL: ");
+	_LOGLN(config.otaSource);
 	ESPhttpUpdate.rebootOnUpdate(false);
-	switch (ESPhttpUpdate.update(firmwareURL)) {
+	switch (ESPhttpUpdate.update(config.otaSource)) {
 	case HTTP_UPDATE_FAILED:
-		Serial.println("[OTA] Failed");
+		_LOGLN("[OTA] Failed");
+		requestFirmwareUpdate = false;
 		break;
 	case HTTP_UPDATE_NO_UPDATES:
-		Serial.println("[OTA] No updates");
+		_LOGLN("[OTA] No updates");
+		requestFirmwareUpdate = false;
 		break;
 	case HTTP_UPDATE_OK:
-		Serial.println("[OTA] OK");
+		_LOGLN("[OTA] OK");
 		requestReboot = true;
 	}
 }
@@ -575,11 +632,40 @@ void updateState() {
 	state.freeHeap = ESP.getFreeHeap();
 	state.lastResetReason = ESP.getResetReason();
 
-	digitalWrite(PIN_VALVE_EN, state.power ? HIGH : LOW);
+	digitalWrite(PIN_VALVE_EN, state.valvePower ? HIGH : LOW);
+}
+
+void controlValve(bool power) {
+	state.valvePower = power;
+	mqttUploadIntDataPoint("power", power ? 1 : 0);
 }
 
 void handleEmergency() {
 	// close the valve
-	state.power = false;
+	controlValve(false);
 	updateState();
+}
+
+void syncClock() {
+	_LOGLN("[Clock] Synchronizing");
+	const char *HEADERS[] = {"Date"};
+	const unsigned int SIZE = 1;
+	HTTPClient httpClient;
+	httpClient.setTimeout(2000);
+	httpClient.begin("http://baidu.com");
+	httpClient.collectHeaders(HEADERS, SIZE);
+	int code = httpClient.sendRequest("HEAD");
+	if (code == 200) {
+		if (httpClient.hasHeader("Date")) {
+			String date = httpClient.header("Date");
+			_LOG("[Clock] Got date from http: ");
+			_LOGLN(date);
+		} else {
+			_LOGLN("[Clock] No Header named Date");
+		}
+	} else {
+		_LOG("[Clock] Failed to sync clock, code: ");
+		_LOGLN(code);
+	}
+	httpClient.end();
 }
