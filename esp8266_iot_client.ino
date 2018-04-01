@@ -12,7 +12,8 @@
 #define _LOGLN(...) DBG_SERIAL.println(__VA_ARGS__)
 
 const uint8_t PIN_BLINK = LED_BUILTIN;
-const uint8_t PIN_VALVE_EN = 12;
+const uint8_t PIN_VALVE_EN = 4;
+const int VALVE_TRIGGER_LEVEL = HIGH;
 
 const int CONFIG_JSON_SIZE = JSON_OBJECT_SIZE(6) + 440;
 const char *CONFIG_FILE_PATH = "/config.json";
@@ -222,6 +223,7 @@ void onMqttConnected(bool /*sessionPresent*/) {
 	_LOGLN("[MQTT] Connected");
 	mqttResponse(2, "");
 	mqttClient.subscribe(config.topic.c_str(), 1);
+	controlValve(false);
 }
 
 void onMqttMessage(char* /*topic*/, char* payload, AsyncMqttClientMessageProperties /*properties*/, size_t len, size_t /*index*/, size_t /*total*/) {
@@ -632,7 +634,10 @@ void updateState() {
 	state.freeHeap = ESP.getFreeHeap();
 	state.lastResetReason = ESP.getResetReason();
 
-	digitalWrite(PIN_VALVE_EN, state.valvePower ? HIGH : LOW);
+	if (VALVE_TRIGGER_LEVEL == LOW)
+		digitalWrite(PIN_VALVE_EN, state.valvePower ? LOW : HIGH);
+	else if (VALVE_TRIGGER_LEVEL == HIGH)
+		digitalWrite(PIN_VALVE_EN, state.valvePower ? HIGH : LOW);
 }
 
 void controlValve(bool power) {
